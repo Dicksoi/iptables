@@ -6,110 +6,189 @@ if [ "$(id -u)" != "0" ]; then
     exit 1
 fi
 
-# 检查并安装依赖
-check_dependencies() {
-    if ! command -v iptables >/dev/null; then
-        echo "正在安装iptables..."
-        apt update && apt install -y iptables
-    fi
-    
-    if ! command -v netfilter-persistent >/dev/null; then
-        echo "正在安装iptables-persistent..."
-        apt update && apt install -y iptables-persistent
+# 安装依赖
+install_deps() {
+    # 检测系统类型
+    if [ -f /etc/debian_version ]; then
+        if ! command -v iptables >/dev/null; then
+            echo "安装iptables..."
+            apt-get update && apt-get install -y iptables
+        fi
+        
+        if ! command -v netfilter-persistent >/dev/null; then
+            echo "安装iptables-persistent..."
+            export DEBIAN_FRONTEND=noninteractive
+            apt-get install -y iptables-persistent
+        fi
+        
+    elif [ -f /etc/redhat-release ]; then
+        if ! command -v iptables >/dev/null; then
+            echo "安装iptables..."
+            yum install -y iptables
+        fi
+        
+        if ! systemctl status iptables >/dev/null 2>&1; then
+            echo "安装iptables-services..."
+            yum install -y iptables-services
+            systemctl enable iptables
+            systemctl start iptables
+        fi
+    else
+        echo "警告：未知的系统类型，持久化可能无法正常工作"
     fi
 }
 
 # 显示当前规则
 show_rules() {
-    echo -e "\n\033[1;36m===== 当前端口转发规则 =====\033[0m"
-    iptables -t nat -L PREROUTING -n --line-numbers -v 2>/dev/null | grep -E 'REDIRECT|DNAT'
-    if [ ${PIPESTATUS[0]} -ne 0 ]; then
-        echo "未找到端口转发规则"
-    fi
-    echo -e "\033[1;36m=============================\033[0m"
+    echo -e "\n\033[1;36m===== 当前端口转发规则 (PREROUTING链) =====\033[0m"
+    
+    # 获取带行号的规则
+    iptables -t nat -L PREROUTING -n --line-numbers 2>/dev/null | awk '
+    BEGIN { count = 0 }
+    /^[0-9]/ {
+        if ($0 ~ /REDIRECT|DNAT/) {
+            # 格式化输出规则
+            printf "%2d: %s %s:%s -> ", $1, $2, $5, $8
+            if ($0 ~ /--to-ports/) {
+                for (i=1; i<=NF; i++) {
+                    if ($i == "--to-ports") {
+                        print $(i+1)
+                        break
+                    }
+                }
+            } else {
+                print $NF
+            }
+            count++
+        }
+    }
+    END { 
+        if (count == 0) print "没有端口转发规则"
+    }'
+    
+    echo -e "\033[1;36m==========================================\033[0m"
 }
 
-# 保存规则
+# 保存规则到持久存储
 save_rules() {
-    echo -e "\033[1;33m正在保存规则...\033[0m"
-    if command -v netfilter-persistent >/dev/null; then
-        netfilter-persistent save
+    echo -e "\n\033[1;33m正在保存规则...\033[0m"
+    
+    if [ -f /etc/debian_version ]; then
+        # Debian/Ubuntu 系统
+        if command -v netfilter-persistent >/dev/null; then
+            netfilter-persistent save >/dev/null
+            echo "已使用 netfilter-persistent 保存规则"
+        else
+            iptables-save > /etc/iptables/rules.v4
+            echo "规则已保存到 /etc/iptables/rules.v4"
+        fi
+        
+    elif [ -f /etc/redhat-release ]; then
+        # CentOS/RHEL 系统
+        if command -v service >/dev/null; then
+            service iptables save >/dev/null
+            echo "已使用 service iptables save 保存规则"
+        else
+            iptables-save > /etc/sysconfig/iptables
+            echo "规则已保存到 /etc/sysconfig/iptables"
+        fi
     else
-        iptables-save > /etc/iptables/rules.v4
+        # 其他系统尝试保存
+        iptables-save > /etc/iptables.conf
+        echo "规则已保存到 /etc/iptables.conf"
+        echo "注意：需要手动配置启动时加载规则"
     fi
-    echo "规则已保存，重启后自动加载"
+    
+    echo -e "\033[1;32m规则已持久化保存，重启后自动加载\033[0m"
 }
 
-# 添加规则
+# 添加新规则
 add_rule() {
-    # 获取网络接口列表
-    interfaces=($(ip a | awk -F': ' '/^[0-9]+:/{print $2}'))
+    # 选择协议
+    echo -e "\n\033[1;32m===== 添加新端口转发规则 =====\033[0m"
+    echo "选择协议:"
+    echo "1) TCP"
+    echo "2) UDP"
+    echo "3) TCP和UDP"
+    read -p "输入选择 (1-3): " proto_choice
     
-    echo -e "\n\033[1;32m选择网络接口：\033[0m"
-    select interface in "${interfaces[@]}" "所有接口"; do
-        [ -n "$interface" ] && break
-        echo "无效选择，请重试！"
+    case $proto_choice in
+        1) protocol="tcp" ;;
+        2) protocol="udp" ;;
+        3) protocol="tcp udp" ;;
+        *) 
+            echo "无效选择，默认使用TCP"
+            protocol="tcp" 
+            ;;
+    esac
+    
+    # 输入源端口（支持范围）
+    while true; do
+        read -p "输入源端口或端口范围 (如 80 或 1000-2000): " src_port
+        if [[ $src_port =~ ^[0-9]{1,5}([-:][0-9]{1,5})?$ ]]; then
+            # 替换任何分隔符为标准的:
+            src_port=$(echo "$src_port" | tr '-' ':')
+            break
+        fi
+        echo "无效格式! 请使用单端口(80)或范围(1000:2000)"
     done
     
-    # 处理协议选择
-    echo -e "\n\033[1;32m选择协议：\033[0m"
-    PS3="输入选项编号 (1-3): "
-    options=("TCP" "UDP" "TCP+UDP")
-    select proto in "${options[@]}"; do
-        case $REPLY in
-            1) protocol="tcp"; break ;;
-            2) protocol="udp"; break ;;
-            3) protocol="tcp udp"; break ;;
-            *) echo "无效选择，请重试！" ;;
-        esac
-    done
-
-    # 输入端口信息
+    # 输入目标端口
     while true; do
-        read -p "输入源端口号 (1-65535): " src_port
-        [[ $src_port =~ ^[1-9][0-9]{0,4}$ ]] && ((src_port >= 1 && src_port <= 65535)) && break
-        echo "端口号无效！"
+        read -p "输入目标端口 (1-65535): " dst_port
+        if [[ $dst_port =~ ^[1-9][0-9]{0,4}$ ]] && [ $dst_port -le 65535 ]; then
+            break
+        fi
+        echo "无效端口号! 必须是1-65535"
     done
-
-    while true; do
-        read -p "输入目标端口号 (1-65535): " dst_port
-        [[ $dst_port =~ ^[1-9][0-9]{0,4}$ ]] && ((dst_port >= 1 && dst_port <= 65535)) && break
-        echo "端口号无效！"
-    done
-
+    
     # 应用规则
     for p in $protocol; do
-        if [ "$interface" = "所有接口" ]; then
-            iptables -t nat -A PREROUTING -p $p --dport $src_port -j REDIRECT --to-port $dst_port
+        if [[ $src_port == *:* ]]; then
+            # 端口范围处理
+            iptables -t nat -A PREROUTING -p $p -m multiport --dports "$src_port" -j REDIRECT --to-port "$dst_port"
+            echo "已添加: $p 端口范围 [$src_port] -> $dst_port"
         else
-            iptables -t nat -A PREROUTING -i $interface -p $p --dport $src_port -j REDIRECT --to-port $dst_port
+            # 单端口处理
+            iptables -t nat -A PREROUTING -p $p --dport "$src_port" -j REDIRECT --to-port "$dst_port"
+            echo "已添加: $p 端口 $src_port -> $dst_port"
         fi
     done
     
-    echo -e "\033[1;32m规则已添加：\033[0m $interface $protocol $src_port -> $dst_port"
     save_rules
 }
 
-# 删除规则
+# 删除现有规则
 delete_rule() {
     while true; do
         show_rules
-        if ! iptables -t nat -L PREROUTING -n --line-numbers | grep -q 'REDIRECT'; then
-            read -p "没有可删除的规则，按回车键继续..." 
+        
+        # 获取规则数量
+        rule_count=$(iptables -t nat -L PREROUTING -n --line-numbers 2>/dev/null | grep -c '^[0-9]')
+        if [ "$rule_count" -eq 0 ]; then
+            read -p "没有可删除的规则，按回车返回主菜单"
             return
         fi
         
-        echo -e "\n\033[1;31m输入要删除的规则编号 (输入0返回上级): \033[0m"
-        read rule_num
+        echo -e "\n输入要删除的规则编号 (输入0返回主菜单): "
+        read -p "> " rule_num
         
         if [ "$rule_num" = "0" ]; then
             return
-        elif [[ "$rule_num" =~ ^[0-9]+$ ]] && iptables -t nat -L PREROUTING --line-numbers | awk 'NR>2{print $1}' | grep -wq $rule_num; then
-            iptables -t nat -D PREROUTING $rule_num
-            echo "规则 $rule_num 已删除"
-            save_rules
+        fi
+        
+        if [[ "$rule_num" =~ ^[0-9]+$ ]] && [ "$rule_num" -le "$rule_count" ] && [ "$rule_num" -gt 0 ]; then
+            # 删除规则
+            iptables -t nat -D PREROUTING "$rule_num"
+            
+            if [ $? -eq 0 ]; then
+                echo -e "\033[1;32m规则 $rule_num 已成功删除\033[0m"
+                save_rules
+            else
+                echo -e "\033[1;31m删除失败! 请检查行号\033[0m"
+            fi
         else
-            echo "无效的规则编号！"
+            echo -e "\033[1;31m无效的规则编号! 有效范围: 1-$rule_count\033[0m"
         fi
     done
 }
@@ -117,29 +196,35 @@ delete_rule() {
 # 主菜单
 main_menu() {
     while true; do
-        echo -e "\n\033[1;34m===== iptables 端口转发管理 =====\033[0m"
-        echo "1) 添加端口转发规则"
-        echo "2) 删除端口转发规则"
-        echo "3) 显示当前规则"
-        echo "4) 保存规则并退出"
-        echo "5) 直接退出"
-        echo "==============================="
+        echo -e "\n\033[1;34m===== IPTABLES 端口转发管理 =====\033[0m"
+        echo "1) 添加新的端口转发规则"
+        echo "2) 删除现有的端口转发规则"
+        echo "3) 显示当前所有规则"
+        echo "4) 保存规则到持久存储"
+        echo "5) 退出脚本"
+        echo "==================================="
         
-        read -p "请输入操作编号 (1-5): " choice
+        read -p "请选择操作 (1-5): " choice
         
         case $choice in
             1) add_rule ;;
             2) delete_rule ;;
             3) show_rules ;;
-            4) save_rules; exit 0 ;;
-            5) exit 0 ;;
-            *) echo "无效输入！" ;;
+            4) save_rules ;;
+            5) 
+                echo "退出脚本"
+                exit 0 
+                ;;
+            *) 
+                echo -e "\033[1;31m无效选择! 请输入1-5的数字\033[0m"
+                ;;
         esac
     done
 }
 
-# 初始化
+# 初始化脚本
 clear
-check_dependencies
-echo -e "\033[1;32m所需依赖已安装\033[0m"
+echo -e "\033[1;35m===== IPTABLES 端口转发脚本 =====\033[0m"
+echo -e "\033[1;33m正在检查系统依赖...\033[0m"
+install_deps
 main_menu
