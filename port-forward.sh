@@ -106,67 +106,93 @@ show_interface_info() {
     echo -e "\033[1;33m提示：如果多个接口有相同IP，请检查网络配置\033[0m"
 }
 
-# 显示当前规则
+# 显示当前规则 - 更健壮的版本
 show_rules() {
     echo -e "\n\033[1;36m===== 当前端口转发规则 (PREROUTING链) =====\033[0m"
     
-    # 获取带行号的规则并格式化输出
+    # 更健壮的规则解析
     iptables -t nat -L PREROUTING -n --line-numbers 2>/dev/null | awk '
-    BEGIN { count = 0 }
+    BEGIN { 
+        count = 0 
+        print "行号 | 协议 | 接口   | 源端口范围    => 目标端口"
+        print "-----------------------------------------------"
+    }
     /^[0-9]/ {
-        if ($0 ~ /REDIRECT|DNAT/) {
-            # 初始化变量
-            rule_num = $1
-            protocol = ""
-            interface = ""
-            src_port = ""
-            dst_port = ""
-            
-            # 解析协议
-            for (i = 2; i <= NF; i++) {
-                if ($i ~ /tcp|udp/) {
-                    protocol = $i
-                    break
+        rule_num = $1
+        protocol = ""
+        interface = ""
+        src_ports = ""
+        target = ""
+        
+        # 查找协议
+        for (i = 4; i <= NF; i++) {
+            if ($i ~ /^tcp$|^udp$|^all$/) {
+                protocol = $i
+                break
+            }
+        }
+        if (protocol == "") protocol = "all"
+        
+        # 查找接口
+        for (i = 4; i <= NF; i++) {
+            if ($i ~ /IN=/ || $i ~ /^i/) {
+                split($i, parts, /=/);
+                interface = parts[2] ? parts[2] : substr($i, 3);
+                break
+            }
+        }
+        if (interface == "") interface = "所有"
+        
+        # 查找源端口
+        for (i = 4; i <= NF; i++) {
+            if ($i ~ /dpt:[0-9]+/) {
+                split($i, parts, ":");
+                src_ports = parts[2]
+            }
+            else if ($i ~ /dpts?:[0-9]+:[0-9]+/) {
+                split($i, parts, ":");
+                src_ports = parts[2] ":" parts[3]
+            }
+        }
+        if (src_ports == "") src_ports = "所有"
+        
+        # 查找目标
+        for (i = 4; i <= NF; i++) {
+            if ($i ~ /to:[0-9]+/) {
+                split($i, parts, ":");
+                target = parts[2]
+            }
+            else if ($i ~ /^REDIRECT/) {
+                for (j = i; j <= NF; j++) {
+                    if ($j ~ /to-ports/) {
+                        target = $(j+1)
+                        break
+                    }
                 }
             }
-            
-            # 解析接口
-            for (i = 2; i <= NF; i++) {
-                if ($i ~ /^i/) {
-                    interface = substr($i, 3) # 去掉 "i:" 前缀
-                    break
+            else if ($i ~ /^DNAT/) {
+                for (j = i; j <= NF; j++) {
+                    if ($j ~ /to-destination/) {
+                        split($(j+1), parts, ":");
+                        target = parts[2] ? parts[2] : $(j+1)
+                        break
+                    }
                 }
             }
-            if (interface == "") interface = "所有"
-            
-            # 解析源端口
-            for (i = 2; i <= NF; i++) {
-                if ($i ~ /dpt:|dports:/) {
-                    split($i, parts, ":")
-                    src_port = parts[2]
-                    break
-                }
-            }
-            
-            # 解析目标端口
-            for (i = 2; i <= NF; i++) {
-                if ($i ~ /to:/) {
-                    split($i, parts, ":")
-                    dst_port = parts[2]
-                    break
-                }
-            }
-            
-            # 输出规则
-            printf "%-3s | %-5s | %-8s | %-15s => %-5s\n", rule_num, protocol, interface, src_port, dst_port
+        }
+        if (target == "") target = "N/A"
+        
+        # 只显示转发规则
+        if (src_ports != "所有" || target != "N/A") {
+            printf "%-4s | %-5s | %-8s | %-13s => %-8s\n", rule_num, protocol, interface, src_ports, target
             count++
         }
     }
     END { 
-        if (count == 0) print "没有端口转发规则"
+        if (count == 0) print "没有找到端口转发规则"
     }'
     
-    echo -e "\033[1;36m===============================================\033[0m"
+    echo -e "\033[1;36m====================================================\033[0m"
 }
 
 # 保存规则到持久存储
@@ -370,7 +396,7 @@ delete_rule() {
         
         if [[ "$rule_num" =~ ^[0-9]+$ ]] && [ "$rule_num" -le "$rule_count" ] && [ "$rule_num" -gt 0 ]; then
             # 先显示规则详细信息
-            rule_info=$(iptables -t nat -L PREROUTING -n --line-numbers | awk -v num=$rule_num '$1 == num {print}')
+            rule_info=$(iptables -t nat -L PREROUTING -n --line-numbers | awk -v num=$rule_num '$1 == num {print $0}')
             echo -e "\033[1;31m将要删除的规则：\033[0m"
             echo "$rule_info"
             
