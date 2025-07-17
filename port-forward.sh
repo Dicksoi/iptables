@@ -106,12 +106,12 @@ show_interface_info() {
     echo -e "\033[1;33m提示：如果多个接口有相同IP，请检查网络配置\033[0m"
 }
 
-# 显示当前规则 - 使用您熟悉的格式
+# 显示当前规则 - 详细格式
 show_rules() {
     echo -e "\n\033[1;36m===== 当前端口转发规则 (PREROUTING链) =====\033[0m"
     
-    # 获取带行号的规则
-    iptables -t nat -L PREROUTING -n --line-numbers -v
+    # 获取带行号的详细规则
+    iptables -t nat -L PREROUTING -n -v --line-numbers
     
     echo -e "\033[1;36m====================================================\033[0m"
 }
@@ -317,7 +317,7 @@ delete_rule() {
         
         if [[ "$rule_num" =~ ^[0-9]+$ ]] && [ "$rule_num" -le "$rule_count" ] && [ "$rule_num" -gt 0 ]; then
             # 先显示规则详细信息
-            rule_info=$(iptables -t nat -L PREROUTING -n --line-numbers | awk -v num=$rule_num '$1 == num {print $0}')
+            rule_info=$(iptables -t nat -L PREROUTING -n -v --line-numbers | awk -v num=$rule_num '$1 == num {print $0}')
             echo -e "\033[1;31m将要删除的规则：\033[0m"
             echo "$rule_info"
             
@@ -387,4 +387,3 @@ install_deps
 interfaces=()
 get_interfaces
 main_menu
-     
