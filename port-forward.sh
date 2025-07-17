@@ -106,11 +106,11 @@ show_interface_info() {
     echo -e "\033[1;33m提示：如果多个接口有相同IP，请检查网络配置\033[0m"
 }
 
-# 显示当前规则 - 更健壮的版本
+# 显示当前规则 - 修复目标端口显示问题
 show_rules() {
     echo -e "\n\033[1;36m===== 当前端口转发规则 (PREROUTING链) =====\033[0m"
     
-    # 更健壮的规则解析
+    # 获取带行号的规则
     iptables -t nat -L PREROUTING -n --line-numbers 2>/dev/null | awk '
     BEGIN { 
         count = 0 
@@ -156,28 +156,20 @@ show_rules() {
         }
         if (src_ports == "") src_ports = "所有"
         
-        # 查找目标
+        # 查找目标端口 - 修复关键部分
         for (i = 4; i <= NF; i++) {
-            if ($i ~ /to:[0-9]+/) {
+            if ($i ~ /to-ports/) {
+                target = $(i+1)
+                break
+            }
+            else if ($i ~ /to:/) {
                 split($i, parts, ":");
                 target = parts[2]
+                break
             }
-            else if ($i ~ /^REDIRECT/) {
-                for (j = i; j <= NF; j++) {
-                    if ($j ~ /to-ports/) {
-                        target = $(j+1)
-                        break
-                    }
-                }
-            }
-            else if ($i ~ /^DNAT/) {
-                for (j = i; j <= NF; j++) {
-                    if ($j ~ /to-destination/) {
-                        split($(j+1), parts, ":");
-                        target = parts[2] ? parts[2] : $(j+1)
-                        break
-                    }
-                }
+            else if ($i ~ /--to-ports/) {
+                target = $(i+1)
+                break
             }
         }
         if (target == "") target = "N/A"
