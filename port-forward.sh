@@ -46,19 +46,43 @@ show_rules() {
     iptables -t nat -L PREROUTING -n --line-numbers 2>/dev/null | awk '
     BEGIN { count = 0 }
     /^[0-9]/ {
-        if ($0 ~ /REDIRECT|DNAT/) {
-            # 格式化输出规则
-            printf "%2d: %s %s:%s -> ", $1, $2, $5, $8
-            if ($0 ~ /--to-ports/) {
-                for (i=1; i<=NF; i++) {
-                    if ($i == "--to-ports") {
-                        print $(i+1)
-                        break
-                    }
-                }
-            } else {
-                print $NF
-            }
+        # 提取规则信息
+        rule_line = $0
+        interface = ""
+        ports = ""
+        proto = ""
+        to_port = ""
+        
+        # 获取协议
+        if (rule_line ~ /^[0-9]+\s+[a-zA-Z]+\s+[a-zA-Z]+\s+(tcp|udp)/) {
+            proto = $5
+        }
+        
+        # 获取源端口
+        if (rule_line ~ /dpts?:[0-9:]+/) {
+            match(rule_line, /dpts?:([0-9:-]+)/, ports)
+            ports = ports[1]
+        } else if (rule_line ~ /dpt:[0-9]+/) {
+            match(rule_line, /dpt:([0-9]+)/, ports)
+            ports = ports[1]
+        }
+        
+        # 获取目标端口
+        if (rule_line ~ /to:[0-9]+/) {
+            match(rule_line, /to:([0-9]+)/, to_port)
+            to_port = to_port[1]
+        }
+        
+        # 获取接口
+        if (rule_line ~ /IN=[a-zA-Z0-9]+/) {
+            match(rule_line, /IN=([a-zA-Z0-9]+)/, iface)
+            interface = iface[1]
+        } else {
+            interface = "all"
+        }
+        
+        if (ports != "" && to_port != "") {
+            printf "%-3s | %-5s | %-8s | %-15s => %-5s\n", $1, proto, interface, ports, to_port
             count++
         }
     }
@@ -66,7 +90,7 @@ show_rules() {
         if (count == 0) print "没有端口转发规则"
     }'
     
-    echo -e "\033[1;36m==========================================\033[0m"
+    echo -e "\033[1;36m===============================================\033[0m"
 }
 
 # 保存规则到持久存储
@@ -102,10 +126,27 @@ save_rules() {
     echo -e "\033[1;32m规则已持久化保存，重启后自动加载\033[0m"
 }
 
+# 获取网络接口列表
+get_interfaces() {
+    interfaces=()
+    while read -r line; do
+        if [[ $line =~ ^[0-9]+:\ [a-zA-Z0-9]+: ]]; then
+            interface=$(echo $line | awk -F': ' '{print $2}' | sed 's/://')
+            interfaces+=("$interface")
+        fi
+    done < <(ip link show)
+    
+    echo "${interfaces[@]}"
+}
+
 # 添加新规则
 add_rule() {
-    # 选择协议
     echo -e "\n\033[1;32m===== 添加新端口转发规则 =====\033[0m"
+    
+    # 获取网络接口
+    interfaces=($(get_interfaces))
+    
+    # 选择协议
     echo "选择协议:"
     echo "1) TCP"
     echo "2) UDP"
@@ -121,6 +162,18 @@ add_rule() {
             protocol="tcp" 
             ;;
     esac
+    
+    # 选择网络接口
+    echo -e "\n选择网络接口:"
+    select interface in "${interfaces[@]}" "所有接口"; do
+        if [ -n "$interface" ]; then
+            if [ "$interface" = "所有接口" ]; then
+                interface=""
+            fi
+            break
+        fi
+        echo "无效选择，请重试!"
+    done
     
     # 输入源端口（支持范围）
     while true; do
@@ -146,12 +199,20 @@ add_rule() {
     for p in $protocol; do
         if [[ $src_port == *:* ]]; then
             # 端口范围处理
-            iptables -t nat -A PREROUTING -p $p -m multiport --dports "$src_port" -j REDIRECT --to-port "$dst_port"
-            echo "已添加: $p 端口范围 [$src_port] -> $dst_port"
+            if [ -z "$interface" ]; then
+                iptables -t nat -A PREROUTING -p $p -m multiport --dports "$src_port" -j REDIRECT --to-port "$dst_port"
+            else
+                iptables -t nat -A PREROUTING -i $interface -p $p -m multiport --dports "$src_port" -j REDIRECT --to-port "$dst_port"
+            fi
+            echo "已添加: $p $interface [$src_port] -> $dst_port"
         else
             # 单端口处理
-            iptables -t nat -A PREROUTING -p $p --dport "$src_port" -j REDIRECT --to-port "$dst_port"
-            echo "已添加: $p 端口 $src_port -> $dst_port"
+            if [ -z "$interface" ]; then
+                iptables -t nat -A PREROUTING -p $p --dport "$src_port" -j REDIRECT --to-port "$dst_port"
+            else
+                iptables -t nat -A PREROUTING -i $interface -p $p --dport "$src_port" -j REDIRECT --to-port "$dst_port"
+            fi
+            echo "已添加: $p $interface $src_port -> $dst_port"
         fi
     done
     
