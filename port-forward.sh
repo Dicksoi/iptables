@@ -202,6 +202,32 @@ save_rules() {
     echo -e "\033[1;32m规则已持久化保存，重启后自动加载\033[0m"
 }
 
+# 验证端口格式
+validate_port() {
+    local port=$1
+    local is_range=$2
+    
+    # 验证单端口
+    if [[ $is_range == "single" ]]; then
+        if [[ $port =~ ^[1-9][0-9]{0,4}$ ]] && [ $port -le 65535 ]; then
+            return 0
+        fi
+        return 1
+    fi
+    
+    # 验证端口范围
+    if [[ $port =~ ^([0-9]{1,5})[:]([0-9]{1,5})$ ]]; then
+        local start_port=${BASH_REMATCH[1]}
+        local end_port=${BASH_REMATCH[2]}
+        
+        if [ $start_port -le 65535 ] && [ $end_port -le 65535 ] && [ $start_port -lt $end_port ]; then
+            return 0
+        fi
+    fi
+    
+    return 1
+}
+
 # 添加新规则
 add_rule() {
     echo -e "\n\033[1;32m===== 添加新端口转发规则 =====\033[0m"
@@ -245,22 +271,35 @@ add_rule() {
     
     # 输入源端口（支持范围）
     while true; do
-        read -p "输入源端口或端口范围 (如 80 或 1000-2000): " src_port
-        if [[ $src_port =~ ^[0-9]{1,5}([-:][0-9]{1,5})?$ ]]; then
-            # 替换任何分隔符为标准的:
-            src_port=$(echo "$src_port" | tr '-' ':')
-            break
+        read -p "输入源端口或端口范围 (如 80 或 38901:38999): " src_port
+        
+        # 替换任何分隔符为标准的冒号
+        src_port=$(echo "$src_port" | tr '-' ':')
+        
+        # 判断是单端口还是范围
+        if [[ $src_port == *:* ]]; then
+            if validate_port "$src_port" "range"; then
+                break
+            else
+                echo "错误：无效的端口范围格式！请使用 起始端口:结束端口 如 38901:38999"
+            fi
+        else
+            if validate_port "$src_port" "single"; then
+                break
+            else
+                echo "错误：无效的端口号！端口必须在1-65535范围内"
+            fi
         fi
-        echo "无效格式! 请使用单端口(80)或范围(1000:2000)"
     done
     
     # 输入目标端口
     while true; do
         read -p "输入目标端口 (1-65535): " dst_port
-        if [[ $dst_port =~ ^[1-9][0-9]{0,4}$ ]] && [ $dst_port -le 65535 ]; then
+        if validate_port "$dst_port" "single"; then
             break
+        else
+            echo "错误：无效的端口号！目标端口必须在1-65535范围内"
         fi
-        echo "无效端口号! 必须是1-65535"
     done
     
     # 确认信息
