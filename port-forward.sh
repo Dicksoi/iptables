@@ -106,7 +106,7 @@ show_interface_info() {
     echo -e "\033[1;33m提示：如果多个接口有相同IP，请检查网络配置\033[0m"
 }
 
-# 显示当前规则 - 修复目标端口显示问题
+# 显示当前规则 - 完全重写的解析逻辑
 show_rules() {
     echo -e "\n\033[1;36m===== 当前端口转发规则 (PREROUTING链) =====\033[0m"
     
@@ -143,7 +143,7 @@ show_rules() {
         }
         if (interface == "") interface = "所有"
         
-        # 查找源端口
+        # 查找源端口 - 更健壮的匹配
         for (i = 4; i <= NF; i++) {
             if ($i ~ /dpt:[0-9]+/) {
                 split($i, parts, ":");
@@ -153,23 +153,42 @@ show_rules() {
                 split($i, parts, ":");
                 src_ports = parts[2] ":" parts[3]
             }
+            else if ($i ~ /multiport dports [0-9:,]+/) {
+                split($i, parts, " ");
+                src_ports = parts[3]
+            }
         }
         if (src_ports == "") src_ports = "所有"
         
-        # 查找目标端口 - 修复关键部分
+        # 查找目标端口 - 完全重写的逻辑
         for (i = 4; i <= NF; i++) {
-            if ($i ~ /to-ports/) {
-                target = $(i+1)
-                break
+            # REDIRECT规则
+            if ($i == "REDIRECT") {
+                for (j = i; j <= NF; j++) {
+                    if ($j == "--to-ports") {
+                        target = $(j+1)
+                        break
+                    }
+                    else if ($j ~ /redir ports/) {
+                        split($j, parts, " ");
+                        target = parts[3]
+                        break
+                    }
+                }
             }
-            else if ($i ~ /to:/) {
-                split($i, parts, ":");
-                target = parts[2]
-                break
-            }
-            else if ($i ~ /--to-ports/) {
-                target = $(i+1)
-                break
+            # DNAT规则
+            else if ($i == "DNAT") {
+                for (j = i; j <= NF; j++) {
+                    if ($j == "to:") {
+                        target = $(j+1)
+                        break
+                    }
+                    else if ($j ~ /to-destination/) {
+                        split($(j+1), parts, ":");
+                        target = parts[2] ? parts[2] : $(j+1)
+                        break
+                    }
+                }
             }
         }
         if (target == "") target = "N/A"
